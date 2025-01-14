@@ -1,0 +1,443 @@
+---
+title: "Econométrie des données spatiales : Analyse des effets spatiaux sur le taux
+  d'activité dans les communes d'Ille-et-Vilaine"
+author: "Ancelin Le Boudec, Marc TANO"
+date: "2024-12-09"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: readable
+    highlight: textmate
+  word_document:
+    toc: true
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE, error=TRUE, comment=NA)
+
+# Librairies
+pacman::p_load(dplyr,stargazer,RColorBrewer,ggridges,tidyr,spatialreg, ggplot2,spdep, sf,readr,readxl,lmtest,tmap,stringr,viridis, vtable, knitr )
+
+```
+
+# Introduction
+
+Ce projet vise à comprendre l’impact des proximités géographiques sur le taux d’activité en 2021 dans les communes d’Ille-et-Vilaine. En nous inscrivant dans une approche d’économétrie spatiale, nous explorons la manière dont les caractéristiques socio-économiques et les interactions de voisinage influencent le taux d'activité.
+
+L’analyse spatiale se concentre sur les effets de voisinage, c’est-à-dire la manière dont le taux d’activité dans une commune peut être influencé par celui des communes adjacentes, tout en tenant compte des spécificités propres à chaque commune. Cette approche permet de modéliser les relations spatiales à travers des effets d’autocorrélation géographique et d’évaluer les dynamiques locales dans un cadre méthodologique rigoureux.
+
+Pour construire notre modèle, nous intégrons plusieurs variables explicatives de contrôle :  
+- **Niveau de vie moyen** (niveau_vie) : indicateur économique reflétant les ressources financières moyennes des habitants.  
+- **Proportion d'entités légales en 2021** (entites_legales_2021) : densité des structures enregistrées, telles que les entreprises ou associations.  
+- **Part des 25-64 ans en 2021** (part_25_64_2021) : proportion de la population en âge de travailler.  
+- **Nombre d’écoles en 2023** (ecoles_2023) : disponibilité des infrastructures éducatives.  
+- **Nombre de supérettes en 2023** (superettes_2023) : reflet de la couverture commerciale de proximité.  
+- **Population totale en 2021** (population_2021) : effectif démographique de chaque commune.  
+- **Évolution de la population** (evol_population) : dynamique démographique récente.  
+- **Créations d'entreprises en 2023** (`creations_2023`) : dynamisme entrepreneurial local.
+
+L’objectif final est d’évaluer la manière dont ces variables, combinées aux proximités géographiques, expliquent les variations du taux d’activité, en mettant en lumière les effets de diffusion spatiale propres à la région Bretagne.
+
+
+# Exploration et analyse des données : Analyse Statistique et Cartographie
+
+## Présentation de la Base de Données
+
+Nous commençons par importer la base de données, puis nous la fusionnons avec un shapefile contenant les coordonnées géométriques de chaque commune, restreintes à la région de Bretagne. Ensuite, nous convertissons le résultat au format sf (simple features), afin de garantir que la colonne des géométries est correctement reconnue et traitée comme une géométrie.
+
+```{r}
+
+#Importation de la base
+fusion <- read_excel("fusion.xlsx")
+# Lecture du shape file
+library(sf)
+library(dplyr)
+library(ggplot2)
+All <- st_read(dsn = "./communes/communes-20220101.shp",stringsAsFactors = TRUE)
+
+# Jointure sur la colonne commune `code_INSEE`
+data <- fusion %>% 
+  left_join(All, by = c("Code"="insee")) 
+
+# S'assurer que la colonne 'geometry' est bien la géométrie
+data_sf <- st_set_geometry(data, "geometry")
+```
+
+Un aperçu de la base de données nous montre ainsi :
+
+```{r}
+head(data_sf,2)
+```
+
+## Statsitique descriptive des variables 
+
+Avant de procéder aux analyses statistiques, nous nous intéressons d'abord aux types de chaque variable.
+
+```{r}
+str(data_sf)
+```
+Nous déclarons ensuite correctement les variables mal interprétées dans la base de données.
+
+```{r}
+data_sf$niveau_vie <- as.numeric(data_sf$niveau_vie)
+data_sf$creations_2023<- as.numeric(data_sf$creations_2023)
+
+```
+
+Un résumé des statistiques descriptives des variables est alors le suivant :
+
+```{r}
+st(data_sf[, c(2, 4:11, 14)])
+```
+
+
+On alyse ainsi quelque boxplot des variables:
+
+```{r}
+par(mfrow=c(2,2),cex.main=0.7)
+boxplot(data_sf$taux_activite_2021 ,  main ="Taux d'activité ( en proportion de la population active" ,col = c( "red") )
+boxplot(data_sf$niveau_vie, main ="niveau de vie en euros" ,col = c( "blue") )
+boxplot(data_sf$population_2021,   main =" population par commune" ,col = c( "red") )
+```
+
+
+Nous observons que les variables de notre base de données sont mesurées à des échelles très différentes, ce qui pourrait rendre l'interprétation des coefficients difficile. Afin de faciliter cette interprétation, nous procédons à une normalisation des données.
+
+Pour ce faire, nous utilisons la fonction scale(), qui transforme les valeurs des variables en les centrant (moyenne de 0) et en les réduisant (écart-type de 1). Ainsi, après normalisation, **les valeurs des variables seront exprimées en termes d'écarts-types**, ce qui permet une comparaison plus aisée entre les variables, indépendamment de leurs échelles initiales.
+
+```{r}
+data_sf <- data_sf %>%
+  mutate(across(where(is.numeric), ~ scale(.) %>% as.vector()))
+
+head(data,2) 
+```
+
+## Représentation cartographique des données
+
+```{r}
+library(ggplot2)
+plot_iv <- ggplot(data_sf) +
+   geom_sf( aes(fill = taux_activite_2021)) +
+   ggtitle("Taux d'activité en 2021") +
+  theme(title = element_text(size = 16))
+plot_iv
+```
+
+
+```{r}
+library(tmap)
+library(viridis)
+tmap_mode("view")
+tm_shape(data_sf)+tm_text(text = "libelle",size=0.8)+tm_graticules(lines=FALSE)+ tm_polygons(col="taux_activite_2021", alpha=0.7,pal = rocket(10, direction = -1),
+              style="pretty", id="libelle_ze",
+              title="Taux d activité en ille et villaine")+ tmap_options(check.and.fix = TRUE)
+```
+
+
+Nous constatons que les communes sont géographiquement très proches les unes des autres. Il est donc naturel d'envisager que des effets de spillover ou d'externalités puissent influencer et moduler l'interprétation des taux d'activité au sein de chaque commune.
+
+# Matrice de poids spatiale
+
+Nous analysons la matrice de poids spatiale selon deux approches : la contiguïté et les *k* plus proches voisins. Cette double perspective permet d’évaluer la sensibilité et la variabilité des tests d’autocorrélation spatiale en fonction du type de matrice utilisé.
+
+## Matrice de contiguité
+
+###  Contruction de la matrice de contiguité
+
+```{r}
+library(spdep)
+coor<-st_centroid(st_geometry(data_sf))
+
+mapC.nb<-poly2nb(data_sf,queen = TRUE)
+
+tm_shape(data_sf)+tm_polygons(col="white", border.col = "grey25")+
+  tm_shape(st_centroid(data_sf))+tm_dots(size = .2,col="red")+
+  tm_shape(nb2lines(mapC.nb, coords=coor))+tm_lines(col="black", lwd=0.3)+
+  tm_layout(title ="Neighbors Contiguity",title.position = c('left', 'top'),frame = FALSE,  scale=0.5)
+```
+
+## Matrice des plus proches voisins
+
+```{r}
+# Calcul des voisins par les 2 plus proches voisins
+mapPPV2.knn <- knearneigh(coor, k=2)
+mapPPV2.nb <- knn2nb(mapPPV2.knn)
+
+# Visualisation des voisins par les 2 plus proches voisins
+tm_shape(data_sf) + 
+  tm_polygons(col="white", border.col="grey25") + 
+  tm_graticules(lines=FALSE) + 
+  tm_shape(st_centroid(data_sf)) + 
+  tm_dots(size=0.2, col="red") + 
+  tm_shape(nb2lines(mapPPV2.nb, coords=coor)) + 
+  tm_lines(col="black", lwd=0.3) + 
+  tm_layout(title="deux Plus Proches coisins", title.position=c('left', 'top'), scale=0.5)
+
+```
+
+
+On constate ainsi que toutes les communes de notre étude disposent d’au moins un voisin dans la matrice de poids spatiale, ce qui renforce la qualité des analyses. Cette configuration garantit des calculs d’autocorrélation spatiale complets (ex. indice de Moran), évitant les biais liés aux observations isolées.
+
+##  Création des matrices de poids spatiaux
+
+```{r}
+# Matrice de poids normalisée pour la matrice des plus proches voisins
+PPV2.w <- nb2listw(mapPPV2.nb, style="W")
+
+# Matrice de poids normalisée pour la matrice de contiguité
+cont.w <- nb2listw(mapC.nb, style="W")
+```
+
+
+# Analyse de l’autocorrélation spatiale
+
+## Avec l'indice Local de Moran (LISA)
+
+### Calcul de l'indice Local de Moran avec la matrice de contiguité
+
+```{r}
+locm_cont <- localmoran(data_sf$taux_activite_2021, cont.w)
+summary(locm_cont)
+
+```
+
+### Calcul de l'indice Local de Moran avec la matrice des plus proches voisins
+
+```{r}
+locm_knn <- localmoran(data_sf$taux_activite_2021, PPV2.w)
+summary(locm_knn)
+```
+## Significativité des indices locaux: Suivant les t-tests
+
+Pour la matrice de contiguïté, les p-values sont autour de 0.4035144 en moyenne, ce qui est supérieur à 0.05, indiquant que la majorité des indices locaux ne sont pas significatifs.
+
+Pour la matrice des plus proches voisins, la p-value moyenne est de 0.4763365, également supérieure à 0.05, ce qui suggère qu'une large portion des indices locaux n'est pas significative.
+
+Ainsi, l'analyse montre qu'il n'y a pas d'autocorrélation spatiale significative entre les communes pour les données analysées.
+
+## Significativité des indices locaux: Par réprésentation graphique
+
+```{r}
+data_sf$quad_sig <- NA
+
+data_sf$W_taux_activite_2021 <- lag.listw(cont.w, data_sf$taux_activite_2021)
+
+# High-High 
+data_sf[(data_sf$taux_activite_2021 >= 0 & data_sf$W_taux_activite_2021 >= 0), "quad_sig"] <- 4  
+
+# Low-Low 
+data_sf[(data_sf$taux_activite_2021 <= 0 & data_sf$W_taux_activite_2021 <= 0), "quad_sig"] <- 3  
+
+# High-Low 
+data_sf[(data_sf$taux_activite_2021 >= 0 & data_sf$W_taux_activite_2021 <= 0), "quad_sig"] <- 2  
+
+# Low-High 
+data_sf[(data_sf$taux_activite_2021 <= 0 & data_sf$W_taux_activite_2021 >= 0), "quad_sig"] <- 1  
+
+# Valeurs non significatives: Au seuil de 1%
+signif <- 0.1
+data_sf$quad_sig[locm_cont[,5] > signif] <- 0  
+
+# Décompte des occurences de classes
+table(data_sf$quad_sig)
+```
+
+
+```{r}
+brks <- c(0,1,2,3,4) 
+colors <- c("white", "blue", rgb(0,0,1,alpha=0.4), rgb(1,0,0,alpha=0.4), "red")  
+
+plot(st_geometry(data_sf), border="lightgray", col=colors[findInterval(data_sf$quad_sig, brks, all.inside=FALSE)])
+box()
+
+legend("topleft", legend = c("insignificant", "low-low", "low-high", "high-low", "high-high"),
+       fill=colors, bty="n", cex=0.7)
+```
+
+
+On peut donc dire que la majorité des zones (266 sur 332) n'ont pas de corrélation spatiale significative, ce qui pourrait indiquer une absence de corrélations spatiales évidentes dans les données. Les zones significatives (Low-High, High-Low, Low-Low, High-High) sont relativement peu nombreuses.Ces résultats sont donc conformes aux résultats obteus avec le test de moran.
+
+## Avec l'Indice de Geary - test d’autocorrélation global
+
+```{r}
+# Test de Geary avec la matrice de contiguïté
+geary.test(data_sf$taux_activite_2021, cont.w, randomisation = FALSE, alternative = "greater")
+
+# Test de Geary avec la matrice des plus proches voisins
+geary.test(data_sf$taux_activite_2021, PPV2.w, randomisation = FALSE, alternative = "greater")
+
+```
+
+Les résultats obtenus avec le test de Moran local (LISA) n'ont pas montré de significativité, ce qui suggère qu'il n'y a pas d'indications claires d'autocorrélation spatiale localisée dans les données, **en dépit des variations observées entre les zones**. Plus précisément, les indices LISA ne révèlent pas de relations significatives entre les zones voisines en termes de taux d'activité. Cette absence de significativité peut être liée à la complexité des interactions spatiales qui ne suivent pas une logique homogène dans les zones étudiées, ou encore à la structure des données qui pourrait ne pas permettre de détecter des corrélations locales significatives.
+
+En revanche, les résultats du test de Geary sont fortement significatifs, ce qui indique la présence d'autocorrélation spatiale globale. **Contrairement aux indices LISA, le test de Geary C évalue l'autocorrélation au niveau global en comparant la similarité entre les zones voisines dans l'ensemble de l'échantillon**. Les p-values très faibles obtenues avec Geary C suggèrent une forte association entre les zones proches les unes des autres en termes de taux d'activité, indiquant un effet de spillover spatial. Cela signifie que les zones voisines tendent à avoir des taux d'activité similaires, ce qui pourrait être interprété comme une forme d'interdépendance spatiale où les caractéristiques d'une zone influencent celles de ses voisines.
+
+Ainsi, pour la suite de la modélisation, nous prendrons en compte la présence d'une autocorrélation spatiale.
+
+# Estimation des modèles spatiaux
+
+## Régression linéaire ordinaire (MCO)
+
+```{r}
+#Gestion des valeurs manquantes
+data_sf <- data_sf %>%
+  mutate(across(where(is.numeric), ~ifelse(is.na(.), mean(., na.rm = TRUE), .)))
+```
+
+```{r}
+ACT_OLS = lm(taux_activite_2021 ~ niveau_vie + evol_population + creations_2023 + part_25_64_2021, data=data_sf)
+summary(ACT_OLS)
+```
+### Test d'hétéroscédasticité de White
+
+```{r}
+bptest(ACT_OLS)
+```
+La p-value de 0,46 indique que les estimations OLS de notre modèle ne sont plus BLUE (Best Linear Unbiased Estimator), car elles ne minimisent plus la variance des erreurs. Il est donc nécessaire d'ajuster notre modèle afin de prendre en compte l'hétéroscédasticité ainsi que les spécificités spatiales. Pour ce faire, nous opterons pour un modèle spatial à effets laggés des variables explicatives (SLX) et un modèle autorégressif spatial (SAR)
+
+## Estimation du modèle SLX
+
+Dans le modèle SLX, nous introduisons un spatial lag pour chacune des variables explicatives afin de mieux capturer l'influence des valeurs observées dans les zones voisines. Cette approche permet ainsi de modéliser les effets de voisinage (spillovers) et d'obtenir une compréhension plus précise des dynamiques spatiales sous-jacentes.
+
+
+```{r}
+data_sf$w_niveau_vie <- lag.listw(cont.w, data_sf$niveau_vie) 
+data_sf$w_evol_population <- lag.listw(cont.w, data_sf$evol_population)
+
+# NA par la moyenne de la colonne
+
+data_sf$w_creations_2023 <- lag.listw(cont.w, data_sf$creations_2023)
+data_sf$w_part_25_64_2021 <- lag.listw(cont.w, data_sf$part_25_64_2021)
+```
+
+### Estimation MCO avec la fonction lm
+
+```{r}
+ACT_SLX = lm(taux_activite_2021 ~ niveau_vie + evol_population + w_niveau_vie + part_25_64_2021+ w_part_25_64_2021 + creations_2023+ w_creations_2023+ w_evol_population, data=data_sf)
+summary(ACT_SLX)
+```
+
+### Analyse des résidus avec le test de Moran
+
+```{r}
+Moran_Res_SLX = lm.morantest(ACT_SLX, cont.w, alternative="two.sided")
+Moran_Res_SLX
+
+```
+Les résultats du test de Moran I pour les résidus du modèle SLX montrent une statistique observée de 0.1215 et une p-value de 0.00014, ce qui indique la présence d'une autocorrélation spatiale significative dans les erreurs. Bien que le modèle SLX ait déjà intégré un effet spatial à travers les variables explicatives, il subsiste une dépendance spatiale non capturée dans les résidus. Cela suggère qu'une partie des dynamiques spatiales n'a pas été pleinement modélisée, même avec l'inclusion de l'effet spatial dans les variables explicatives. Pour améliorer la spécification du modèle et tenir pleinement compte des effets spatiaux, il serait pertinent de se tourner vers des modèles comme le modèle SAR (Spatial Autoregressive) ou SEM (Spatial Error Model), qui permettent de modéliser explicitement les dépendances spatiales dans les erreurs.
+
+
+## Modèle autorégressif spatial (SAR)
+
+```{r}
+ACT_SAR <-lagsarlm(taux_activite_2021 ~ niveau_vie + evol_population  + part_25_64_2021 + creations_2023, listw=cont.w  , data=data_sf)
+summary(ACT_SAR)
+```
+
+
+### Analyse des résidus avec le test de Moran
+
+
+```{r}
+moran_test <- moran.test(residuals(ACT_SAR), listw = cont.w)
+print(moran_test)
+```
+
+Les résultats du test de Moran's I pour les résidus du modèle SAR montrent une statistique de Moran I de -0.066, avec une p-value de 0.9674. Voici l'interprétation de ces résultats :
+
+- **Moran I statistic** : La valeur de la statistique de Moran I est proche de zéro, ce qui suggère qu'il n'y a pas d'autocorrélation spatiale importante dans les résidus du modèle SAR.
+- **p-value = 0.9674** : Une p-value aussi élevée indique que nous n'avons pas suffisamment de preuves pour rejeter l'hypothèse nulle d'absence d'autocorrélation spatiale. En d'autres termes, les résidus semblent être indépendants spatialement.
+
+
+Ainsi, les résidus du modèle SAR ne présentent pas d'autocorrélation spatiale significative. Cela signifie que le modèle SAR semble bien capturer les effets spatiaux, et il n'est pas nécessaire de chercher des ajustements supplémentaires pour l'autocorrélation spatiale dans ce cas.
+
+### Interprétation des résultats
+
+Au regard de l'absence d'autocorrélation spatiale confirmée par le test de Moran, on peut alors interpréter la significativité des coefficients spatiaux obtenus. Dans le modèle SAR, seules les variables **évolution de la population**, **part des 25-64 ans en 2021**, et **créations d'entreprises en 2023** sont significativement associées au taux d'activité, au seuil de 5%. Ces résultats suggèrent que :
+
+- **L'évolution de la population** a un impact positif et significatif sur le taux d'activité, indiquant que les zones avec une croissance démographique tendent à avoir un taux d'activité plus élevé.
+- **La part de la population active dans la tranche des 25-64 ans en 2021** a également un effet positif et très significatif, suggérant que des niveaux plus élevés de cette population active augmentent le taux d'activité dans les zones environnantes.
+- **Les créations d'entreprises en 2023** ont un effet négatif significatif sur le taux d'activité, ce qui pourrait refléter un ajustement temporaire ou des facteurs contextuels liés à la dynamique économique.
+
+Ces résultats confirment que certains facteurs socio-économiques ont des effets spatiaux significatifs, influençant le taux d'activité non seulement au niveau local, mais également par l'intermédiaire des interactions avec les zones voisines.
+
+Pour approfondir l'analyse des effets spatiaux des variables significatives, nous allons désormais explorer les mesures d'impact à travers la méthode de simulation de Monte Carlo. Cela nous permettra de mieux comprendre non seulement l'ampleur de ces impacts mais aussi leur variabilité spatiale et la robustesse des estimations. En utilisant la fonction impacts() appliquée au modèle SAR, nous pouvons quantifier l'impact direct, indirect et total de chaque variable sur le taux d'activité, tout en prenant en compte l'incertitude associée à ces estimations grâce à des simulations répétées. 
+
+### Calcul des effets directs et indirects avec la fonction impacts
+
+```{r}
+summary(impacts(ACT_SAR,listw=cont.w, R=1000), zstats=TRUE)
+```
+
+
+L’analyse des impacts spatiaux dans le modèle SAR révèle des effets directs, indirects et totaux significatifs pour certaines variables. 
+
+- **Niveau de vie** : L'impact total est négatif (-0.148), indiquant que des améliorations du niveau de vie dans une zone peuvent avoir des effets négatifs sur les zones voisines. Cependant, l'impact direct (-0.084) et indirect (-0.064) sont relativement modérés, avec une p-value de 0.0915 pour l'impact total, suggérant une faible significativité.
+  
+- **Évolution de la population** : Cette variable présente un impact positif total de 0.173, avec des effets directs (0.098) et indirects (0.075) qui renforcent les effets voisins. L'impact est significatif, notamment au niveau direct, avec une p-value de 0.0502, ce qui indique un lien positif entre la croissance démographique et les zones environnantes.
+
+- **Part des 25-64 ans en 2021** : Le plus grand impact observé, avec un total de 0.711. Les effets directs (0.403) et indirects (0.308) sont substantiels et montrent une forte corrélation positive avec les zones voisines. Les tests statistiques confirment la robustesse de cet impact, avec une p-value inférieure à 2.22e-16.
+
+- **Créations d'entreprises en 2023** : L’impact total est négatif (-0.288), ce qui suggère que l’augmentation des créations d'entreprises dans une zone pourrait avoir un effet défavorable sur les zones voisines. Cela est confirmé par des valeurs de p inférieures à 0.001, indiquant la significativité statistique des résultats.
+
+L’analyse des impacts spatiaux dans le modèle SAR révèle des effets directs, indirects et totaux significatifs pour plusieurs variables clés. 
+
+- **Niveau de vie** : L'impact total est négatif (-0.148), avec des effets directs (-0.084) et indirects (-0.064). Bien que ces impacts soient modérés, la p-value de 0.0915 indique une faible significativité, suggérant que l'impact du niveau de vie sur les zones voisines n'est pas très fort mais peut tout de même être pertinent à prendre en compte.
+
+- **Évolution de la population** : Cette variable présente un impact total positif de 0.173, avec des effets directs (0.098) et indirects (0.075) renforçant les effets voisins. La p-value de 0.0502 indique que cet impact est significatif, confirmant qu’une croissance démographique dans une zone entraîne une augmentation de la population dans les zones environnantes.
+
+- **Part des 25-64 ans en 2021** : Cette variable montre l'impact le plus marqué, avec un effet total de 0.711. Les effets directs (0.403) et indirects (0.308) sont élevés, confirmant la forte interconnexion entre la part de la population active et les zones voisines. Les tests statistiques montrent que cet impact est hautement significatif, avec une p-value inférieure à 2.22e-16.
+
+- **Créations d’entreprises en 2023** : L'impact total est négatif (-0.288), suggérant que l’augmentation des créations d'entreprises dans une zone a un effet défavorable sur les zones voisines. Cela est confirmé par des p-values inférieures à 0.001, indiquant que l'impact est fortement significatif.
+
+Les simulations par la méthode de Monte Carlo permettent de valider ces résultats en fournissant des intervalles de confiance précis. Les p-values associées aux impacts indirects et totaux renforcent la robustesse des estimations. En particulier, l'impact de la **part de la population active** et des **créations d’entreprises** apparaît comme très significatif, indiquant des effets d’entraînement notables sur les zones environnantes.
+
+
+# Représentation de la densité des résidus MCO, SLX et SAR
+
+```{r}
+data_sf %>%
+  mutate(ols_res = residuals(ACT_OLS),  
+         sar_res = residuals(ACT_SAR),   
+         slx_res = residuals(ACT_SLX)) %>% 
+  st_drop_geometry() %>%
+  pivot_longer(cols = c('ols_res', 'sar_res', 'slx_res')) %>%
+  ggplot() + 
+    geom_density(mapping = aes(x = value, 
+                               color = name, fill = name), 
+                  alpha = 0.3) +
+    scale_color_manual(values = brewer.pal(n = 3, name = "Dark2"), 
+                       labels = c("Résidus OLS", "Résidus SAR", "Résidus SLX")) +
+    scale_fill_manual(values = brewer.pal(n = 3, name = "Dark2"), 
+                      labels = c("Résidus OLS", "Résidus SAR", "Résidus SLX")) +
+    labs(x = "Résidus", y = "Densité", 
+         title = "Comparaison de la densité des résidus OLS, SLX et SAR", 
+         color = "Modèle", 
+         fill = "Modèle")
+
+```
+
+La comparaison des résidus issus des différents modèles (OLS, SLX, et SAR) révèle des différences dans la distribution des erreurs. En observant les densités des résidus, le modèle SAR présente des résidus qui semblent plus proches d'une distribution normale, ce qui suggère que ce modèle capture mieux les dynamiques spatiales par rapport aux autres. La normalité des résidus est un indicateur clé de la validité du modèle, et dans ce cas, elle soutient l'idée que le modèle SAR est bien ajusté aux données, tout en respectant les hypothèses d'indépendance des erreurs. Ces résultats viennent ainsi renforcer les conclusions obtenues précédemment, confirmant la robustesse du modèle SAR dans l'analyse des dynamiques spatiales de nos variables d'intérêt.
+
+# Synthèse des résultats et conclusion. 
+
+```{r}
+stargazer(ACT_OLS,ACT_SLX, ACT_SAR, type = "text",header=FALSE,model.names = FALSE,
+          dep.var.labels.include = FALSE,column.labels =  c("OLS","SLX","SAR"),
+          model.numbers          = FALSE,  title="Résultats d'estimation des modèles spatiaux")
+```
+
+
+Au total, plusieurs modèles ont été testés afin de comprendre les dynamiques spatiales sous-jacentes dans nos données. Des modèles comme l'OLS et le SLX se sont révélés inefficaces pour résoudre l'autocorrélation spatiale présente dans les résidus, limitant ainsi la validité de leurs estimations. Finalement, nous nous sommes tournés vers le modèle SAR, qui, en prenant en compte l'autocorrélation spatiale, a permis de mieux capturer les effets spatiaux et a produit des résultats plus robustes.
+
+Il n'est dès lors pas nécessaire de comparer en détail les différents modèles, car le modèle SAR a démontré sa supériorité en offrant une meilleure ajustement des données. Parmi les résultats clés obtenus avec le modèle SAR, on note l'impact significatif de la part de la population active et des créations d'entreprises sur l'activité économique, tandis que d'autres variables, comme le niveau de vie, se sont avérées non significatives. Cela suggère que l'activité économique dans une région est fortement influencée par les dynamiques de la population active et l'entrepreneuriat local, avec des effets importants qui se propagent spatialement aux zones voisines. En revanche, le niveau de vie semble avoir moins d'impact direct, ce qui pourrait indiquer que d'autres facteurs socio-économiques ou politiques influencent davantage l'activité économique à l'échelle locale. Ces conclusions soulignent l'importance de prendre en compte les dynamiques spatiales pour comprendre les facteurs influençant l'économie locale.
+
+
+
+
+
+
+
